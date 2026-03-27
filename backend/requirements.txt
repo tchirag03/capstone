@@ -9,3 +9,5 @@ python-multipart==0.0.12
 torch
 transformers
 Pillow
+accelerate
+reportlab

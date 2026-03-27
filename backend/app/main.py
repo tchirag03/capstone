@@ -14,6 +14,7 @@ from app.db.queries.index_setup import ensure_indexes
 from app.db.services.queue_service import start_worker
 from app.services.ocr_service import init_ocr_service
 from app.services.structuring_service import init_structuring_service
+from app.services.slm_service import init_slm_service
 
 from app.routers import (
     evaluations,
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
     await ensure_indexes()
     init_ocr_service()  # Load TrOCR model (runs once)
     init_structuring_service()
+    init_slm_service()  # Load Qwen2.5-0.5B (runs once)
     worker_task = asyncio.create_task(start_worker())
     yield
     # Shutdown
