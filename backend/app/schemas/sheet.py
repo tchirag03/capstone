@@ -19,8 +19,10 @@ SheetStatus = Literal[
     "structuring-processing",
     "structuring-completed",
     "structuring-failed",
-    "evaluated",
-    "error",
+    "evaluation-pending",
+    "evaluation-processing",
+    "evaluation-completed",
+    "evaluation-failed",
 ]
 
 

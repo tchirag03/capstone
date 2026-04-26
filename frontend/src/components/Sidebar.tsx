@@ -6,7 +6,6 @@ function Sidebar() {
 
   const navItems = [
     { label: 'Upload Sheets', path: `/evaluation/${evaluationId}/upload` },
-    { label: 'Rubric Builder', path: `/evaluation/${evaluationId}/rubric` },
     { label: 'Process Evaluation', path: `/evaluation/${evaluationId}/process` },
     { label: 'Results Overview', path: `/evaluation/${evaluationId}/results` },
     { label: 'Export Results', path: `/evaluation/${evaluationId}/export` },

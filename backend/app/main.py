@@ -36,9 +36,10 @@ async def lifespan(app: FastAPI):
     await connect_db()
     await connect_redis()
     await ensure_indexes()
-    init_ocr_service()  # Load TrOCR model (runs once)
+
+    init_ocr_service()   # Mistral OCR client (runs once)
     init_structuring_service()
-    init_slm_service()  # Load Qwen2.5-0.5B (runs once)
+    init_slm_service()   # Load Qwen2.5-0.5B (runs once)
     worker_task = asyncio.create_task(start_worker())
     yield
     # Shutdown

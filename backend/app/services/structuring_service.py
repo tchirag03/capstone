@@ -53,10 +53,137 @@ _STEP_SPLIT = re.compile(
 # Complexity patterns
 _COMPLEXITY_RE = re.compile(r"O\([^)]+\)", re.IGNORECASE)
 
+# ---------------------------------------------------------------------------
+# OCR cleaning patterns  (from ocr_pipeline_prompt.md — Step 1)
+# ---------------------------------------------------------------------------
+
+# Broken words: a space inserted inside a word (e.g. "al go rithm" → not fixable
+# generically, but we can catch single-char fragments glued to neighbours)
+_BROKEN_SINGLE_CHAR = re.compile(r"(?<=[a-zA-Z])\s([a-zA-Z])\s(?=[a-zA-Z])")
+
+# Excessive whitespace (tabs, multiple spaces → single space)
+_MULTI_SPACE = re.compile(r"[^\S\n]{2,}")
+
+# Garbled / non-printable characters (everything outside basic printable ASCII
+# + common Unicode letters, but keep newlines)
+_GARBLED = re.compile(r"[^\x20-\x7E\n\u00C0-\u024F]+")
+
+# Lines that are entirely noise (fewer than 2 alphanumeric chars)
+_NOISE_LINE = re.compile(r"^[^a-zA-Z0-9]*[a-zA-Z0-9]?[^a-zA-Z0-9]*$")
+
 
 class StructuringService:
     """Parse raw OCR text into structured Q&A data."""
 
+    # ------------------------------------------------------------------
+    # OCR text cleaning  (prompt Step 1)
+    # ------------------------------------------------------------------
+    def clean_ocr_text(self, raw_text: str) -> str:
+        """Apply rule-based cleaning to raw OCR output.
+
+        Implements the OCR Cleaning step from ocr_pipeline_prompt.md:
+          • Fix common spacing issues and broken words
+          • Mark illegible / garbled sequences as [OCR_UNCLEAR]
+          • Preserve code syntax, variable names, and math expressions
+          • Do NOT alter meaning
+
+        Args:
+            raw_text: Raw text straight from the Vision API.
+
+        Returns:
+            Cleaned text ready for question splitting.
+        """
+        if not raw_text or not raw_text.strip():
+            return ""
+
+        lines = raw_text.split("\n")
+        cleaned_lines: list[str] = []
+
+        for line in lines:
+            # Skip entirely noisy lines
+            if _NOISE_LINE.match(line) and len(line.strip()) > 0:
+                # Only skip if the line has almost no real content
+                alnum_count = sum(1 for c in line if c.isalnum())
+                if alnum_count < 2 and len(line.strip()) > 3:
+                    continue
+
+            # Replace garbled character sequences with [OCR_UNCLEAR]
+            # but only if the sequence is 2+ chars (avoid marking single
+            # Unicode accent characters)
+            cleaned = _GARBLED.sub(lambda m: "[OCR_UNCLEAR]" if len(m.group()) >= 2 else m.group(), line)
+
+            # Convert LaTeX formulas to human-readable text
+            cleaned = self._convert_latex_to_text(cleaned)
+
+            # Collapse excessive whitespace
+            cleaned = _MULTI_SPACE.sub(" ", cleaned)
+
+            # Re-join single-character fragments that OCR split apart
+            # e.g. "a l g o r i t h m" — only when surrounded by letters
+            cleaned = _BROKEN_SINGLE_CHAR.sub(r"\1", cleaned)
+
+            # Strip leading/trailing whitespace per line
+            cleaned = cleaned.strip()
+
+            if cleaned:
+                cleaned_lines.append(cleaned)
+
+        return "\n".join(cleaned_lines)
+
+    def _convert_latex_to_text(self, text: str) -> str:
+        """Convert LaTeX math/formulas to human-readable Markdown/plain text.
+        
+        Examples:
+          \text{Mid} -> Mid
+          \frac{a}{b} -> (a) / (b)
+          \rightarrow -> ->
+        """
+        # 1. Basic formatting commands
+        text = re.sub(r"\\text\{([^}]+)\}", r"\1", text)
+        text = re.sub(r"\\boxed\{([^}]+)\}", r"[\1]", text)
+        
+        # 2. Fractions: \frac{num}{den} -> (num) / (den)
+        # Handle nested braces with a simple loop if needed, but basic regex first
+        while "\\frac{" in text:
+            new_text = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1) / (\2)", text)
+            if new_text == text: break
+            text = new_text
+
+        # 3. Square roots
+        text = re.sub(r"\\sqrt\{([^}]+)\}", r"sqrt(\1)", text)
+
+        # 4. Arrows
+        text = text.replace("\\rightarrow", "->")
+        text = text.replace("\\Rightarrow", "=>")
+        text = text.replace("\\leftarrow", "<-")
+        text = text.replace("\\Leftarrow", "<=")
+        text = text.replace("\\leftrightarrow", "<->")
+
+        # 5. Symbols & Operators
+        text = text.replace("\\times", "*")
+        text = text.replace("\\div", "/")
+        text = text.replace("\\pm", "+/-")
+        text = text.replace("\\le", "<=")
+        text = text.replace("\\ge", ">=")
+        text = text.replace("\\neq", "!=")
+        text = text.replace("\\infty", "infinity")
+        text = text.replace("\\dots", "...")
+
+        # 6. Arrays / Tables (Simple flattening)
+        text = re.sub(r"\\begin\{array\}\{[^}]+\}", "", text)
+        text = text.replace("\\end{array}", "")
+        text = text.replace("\\\\", "\n")  # Newline in arrays
+        text = text.replace("&", " | ")    # Column separator
+
+        # 7. Remove math delimiters
+        text = text.replace("$$", "")
+        text = text.replace("$", "")
+
+        return text
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
     def structure_text(self, raw_text: str) -> dict:
         """Main entry point.
 
@@ -76,7 +203,10 @@ class StructuringService:
                 },
             }
 
-        question_blocks = self._split_questions(raw_text)
+        # Step 1: Clean OCR artefacts before parsing
+        cleaned_text = self.clean_ocr_text(raw_text)
+
+        question_blocks = self._split_questions(cleaned_text)
 
         questions = []
         total_steps = 0

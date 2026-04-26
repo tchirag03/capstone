@@ -1,17 +1,75 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import type { DragEvent, ChangeEvent } from 'react'
-import { useParams } from 'react-router-dom'
-import type { UploadedFile } from '@/types'
+import { useParams, useNavigate } from 'react-router-dom'
+import { get, upload, del } from '@/api/client'
+
+interface SheetInfo {
+  id: string
+  name: string
+  size: number
+  status: 'uploading' | 'uploaded' | 'error'
+  error?: string
+}
+
+interface RubricInfo {
+  name: string
+  size: number
+  status: 'uploading' | 'uploaded' | 'error'
+}
+
+interface ListSheetsApiResponse {
+  success: boolean
+  sheets: {
+    id: string
+    file_name: string
+    file_size: number
+    status: string
+  }[]
+}
 
 function UploadSheets() {
   const { evaluationId } = useParams<{ evaluationId: string }>()
-  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
+  const navigate = useNavigate()
+  const [uploadedFiles, setUploadedFiles] = useState<SheetInfo[]>([])
   const [isDragging, setIsDragging] = useState(false)
+  const [isUploading, setIsUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Rubric upload state
-  const [rubricFile, setRubricFile] = useState<UploadedFile | null>(null)
+  const [rubricFile, setRubricFile] = useState<RubricInfo | null>(null)
   const rubricInputRef = useRef<HTMLInputElement>(null)
+
+  // Load existing sheets and rubric on mount
+  useEffect(() => {
+    if (!evaluationId) return
+    const loadData = async () => {
+      try {
+        // Fetch sheets
+        const sheetsData = await get<ListSheetsApiResponse>(`/evaluations/${evaluationId}/sheets`)
+        setUploadedFiles(
+          sheetsData.sheets.map((s) => ({
+            id: s.id,
+            name: s.file_name,
+            size: s.file_size,
+            status: 'uploaded' as const,
+          }))
+        )
+
+        // Fetch rubric
+        try {
+          const rubricData = await get<{ success: boolean; rubric: any }>(`/evaluations/${evaluationId}/rubric`)
+          if (rubricData.success && rubricData.rubric) {
+            setRubricFile(rubricData.rubric)
+          }
+        } catch {
+          // No rubric yet
+        }
+      } catch {
+        // Error loading sheets
+      }
+    }
+    loadData()
+  }, [evaluationId])
 
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 Bytes'
@@ -21,16 +79,57 @@ function UploadSheets() {
     return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
   }
 
-  const handleFiles = (files: FileList | null) => {
-    if (!files) return
+  // Upload files to the backend
+  const handleFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0 || !evaluationId) return
 
-    const newFiles: UploadedFile[] = Array.from(files).map(file => ({
-      id: `${file.name}-${Date.now()}-${Math.random()}`,
+    setIsUploading(true)
+
+    // Add files with 'uploading' status immediately for UI feedback
+    const newFiles: SheetInfo[] = Array.from(files).map((file) => ({
+      id: `temp-${file.name}-${Date.now()}`,
       name: file.name,
       size: file.size,
+      status: 'uploading' as const,
     }))
+    setUploadedFiles((prev) => [...prev, ...newFiles])
 
-    setUploadedFiles(prev => [...prev, ...newFiles])
+    try {
+      const formData = new FormData()
+      Array.from(files).forEach((file) => {
+        formData.append('files', file)
+      })
+
+      const response = await upload<{
+        success: boolean
+        uploaded_sheets: { sheet_id: string; file_name: string; file_size: number; status: string }[]
+        message: string
+      }>(`/evaluations/${evaluationId}/sheets`, formData)
+
+      // Replace temp entries with real server data
+      setUploadedFiles((prev) => {
+        // Remove the temp entries we just added
+        const withoutTemps = prev.filter((f) => !f.id.startsWith('temp-'))
+        const serverFiles: SheetInfo[] = response.uploaded_sheets.map((s) => ({
+          id: s.sheet_id,
+          name: s.file_name,
+          size: s.file_size,
+          status: 'uploaded' as const,
+        }))
+        return [...withoutTemps, ...serverFiles]
+      })
+    } catch (err: any) {
+      // Mark all temp files as errored
+      setUploadedFiles((prev) =>
+        prev.map((f) =>
+          f.id.startsWith('temp-')
+            ? { ...f, status: 'error' as const, error: err.message }
+            : f
+        )
+      )
+    } finally {
+      setIsUploading(false)
+    }
   }
 
   const handleDragEnter = (e: DragEvent<HTMLDivElement>) => {
@@ -54,32 +153,47 @@ function UploadSheets() {
     e.preventDefault()
     e.stopPropagation()
     setIsDragging(false)
-
-    const files = e.dataTransfer.files
-    handleFiles(files)
+    handleFiles(e.dataTransfer.files)
   }
 
   const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     handleFiles(e.target.files)
+    // Reset input so the same file can be re-selected
+    if (e.target) e.target.value = ''
   }
 
-  const handleRemoveFile = (fileId: string) => {
-    setUploadedFiles(prev => prev.filter(file => file.id !== fileId))
+  const handleRemoveFile = async (fileId: string) => {
+    // Optimistic UI update
+    setUploadedFiles((prev) => prev.filter((file) => file.id !== fileId))
+
+    if (!evaluationId || fileId.startsWith('temp-')) return
+
+    try {
+      await del(`/evaluations/${evaluationId}/sheets/${fileId}`)
+    } catch (err: any) {
+      console.error('Failed to delete file from server:', err)
+      // Optional: Could revert UI state here, but for simplicity we log the error
+    }
   }
 
   const handleBrowseClick = () => {
     fileInputRef.current?.click()
   }
 
-  // Rubric file upload handlers
-  const handleRubricFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+  // Rubric file upload
+  const handleRubricFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) {
-      setRubricFile({
-        id: `rubric-${Date.now()}`,
-        name: file.name,
-        size: file.size,
-      })
+    if (!file || !evaluationId) return
+
+    setRubricFile({ name: file.name, size: file.size, status: 'uploading' })
+
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      await upload(`/evaluations/${evaluationId}/rubric`, formData)
+      setRubricFile({ name: file.name, size: file.size, status: 'uploaded' })
+    } catch {
+      setRubricFile({ name: file.name, size: file.size, status: 'error' })
     }
   }
 
@@ -87,12 +201,50 @@ function UploadSheets() {
     rubricInputRef.current?.click()
   }
 
-  const handleRemoveRubric = () => {
-    setRubricFile(null)
-    if (rubricInputRef.current) {
-      rubricInputRef.current.value = ''
+  const handleRemoveRubric = async () => {
+    if (!evaluationId || !rubricFile || rubricFile.status !== 'uploaded') {
+      setRubricFile(null)
+      return
+    }
+
+    try {
+      await del(`/evaluations/${evaluationId}/rubric`)
+      setRubricFile(null)
+      if (rubricInputRef.current) {
+        rubricInputRef.current.value = ''
+      }
+    } catch (err) {
+      console.error('Failed to remove rubric:', err)
     }
   }
+
+  const handleClearAll = async () => {
+    if (!evaluationId || realSheets.length === 0) {
+      setUploadedFiles([])
+      return
+    }
+
+    const confirmClear = window.confirm(`Are you sure you want to delete all ${realSheets.length} uploaded files?`)
+    if (!confirmClear) return
+
+    try {
+      // Delete each file sequentially or in parallel
+      await Promise.all(realSheets.map(file => del(`/evaluations/${evaluationId}/sheets/${file.id}`)))
+      setUploadedFiles([])
+    } catch (err) {
+      console.error('Failed to clear all files:', err)
+      // Refresh list to show what's actually left
+      const data = await get<ListSheetsApiResponse>(`/evaluations/${evaluationId}/sheets`)
+      setUploadedFiles(data.sheets.map(s => ({
+        id: s.id,
+        name: s.file_name,
+        size: s.file_size,
+        status: 'uploaded'
+      })))
+    }
+  }
+
+  const realSheets = uploadedFiles.filter((f) => f.status === 'uploaded')
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -100,7 +252,7 @@ function UploadSheets() {
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-slate-800 mb-2">Upload Answer Sheets</h1>
         <p className="text-slate-600">
-          Evaluation ID: <span className="font-semibold text-slate-800">{evaluationId}</span>
+          Evaluation ID: <span className="font-semibold text-slate-800 font-mono text-sm">{evaluationId}</span>
         </p>
       </div>
 
@@ -117,7 +269,6 @@ function UploadSheets() {
               onChange={handleRubricFileChange}
               className="hidden"
             />
-
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <svg className="w-10 h-10 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -128,7 +279,6 @@ function UploadSheets() {
                   <p className="text-sm text-slate-500">PDF, DOC, DOCX, or TXT files accepted</p>
                 </div>
               </div>
-
               <button
                 onClick={handleRubricBrowseClick}
                 className="bg-slate-700 hover:bg-slate-800 text-white font-semibold py-2 px-6 rounded-lg transition-colors duration-200"
@@ -138,21 +288,26 @@ function UploadSheets() {
             </div>
           </div>
         ) : (
-          <div className="bg-white border-2 border-green-200 rounded-lg p-6">
+          <div className={`bg-white border-2 rounded-lg p-6 ${rubricFile.status === 'uploaded' ? 'border-green-200' : rubricFile.status === 'error' ? 'border-red-200' : 'border-blue-200'}`}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-4">
-                <div className="w-12 h-12 bg-green-100 rounded flex items-center justify-center shrink-0">
-                  <svg className="w-6 h-6 text-green-600" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
-                  </svg>
+                <div className={`w-12 h-12 rounded flex items-center justify-center shrink-0 ${rubricFile.status === 'uploaded' ? 'bg-green-100' : rubricFile.status === 'error' ? 'bg-red-100' : 'bg-blue-100'}`}>
+                  {rubricFile.status === 'uploading' ? (
+                    <svg className="w-6 h-6 text-blue-600 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                  ) : (
+                    <svg className={`w-6 h-6 ${rubricFile.status === 'uploaded' ? 'text-green-600' : 'text-red-600'}`} fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+                    </svg>
+                  )}
                 </div>
-
                 <div className="flex-1">
                   <p className="font-semibold text-slate-800">{rubricFile.name}</p>
                   <p className="text-sm text-slate-500">{formatFileSize(rubricFile.size)}</p>
                 </div>
               </div>
-
               <button
                 onClick={handleRemoveRubric}
                 className="text-red-600 hover:text-red-700 hover:bg-red-50 p-2 rounded transition-colors"
@@ -215,9 +370,14 @@ function UploadSheets() {
 
           <button
             onClick={handleBrowseClick}
-            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg"
+            disabled={isUploading}
+            className={`font-semibold py-3 px-8 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg ${
+              isUploading
+                ? 'bg-blue-400 cursor-not-allowed text-white'
+                : 'bg-blue-600 hover:bg-blue-700 text-white'
+            }`}
           >
-            Browse Files
+            {isUploading ? 'Uploading...' : 'Browse Files'}
           </button>
 
           <p className="text-sm text-slate-500 mt-4">
@@ -231,14 +391,16 @@ function UploadSheets() {
         <div className="mt-8">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-bold text-slate-800">
-              Uploaded Files ({uploadedFiles.length})
+              Uploaded Files ({realSheets.length})
             </h2>
-            <button
-              onClick={() => setUploadedFiles([])}
-              className="text-sm text-red-600 hover:text-red-700 font-semibold"
-            >
-              Clear All
-            </button>
+            {uploadedFiles.length > 0 && (
+              <button
+                onClick={handleClearAll}
+                className="text-sm text-red-600 hover:text-red-700 font-semibold"
+              >
+                Clear All
+              </button>
+            )}
           </div>
 
           <div className="bg-white border-2 border-slate-200 rounded-lg overflow-hidden">
@@ -249,20 +411,33 @@ function UploadSheets() {
               >
                 <div className="flex items-center gap-4 flex-1">
                   {/* File Icon */}
-                  <div className="w-10 h-10 bg-blue-100 rounded flex items-center justify-center shrink-0">
-                    <svg className="w-6 h-6 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-                      <path
-                        fillRule="evenodd"
-                        d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"
-                        clipRule="evenodd"
-                      />
-                    </svg>
+                  <div className={`w-10 h-10 rounded flex items-center justify-center shrink-0 ${
+                    file.status === 'error' ? 'bg-red-100' : file.status === 'uploading' ? 'bg-blue-100' : 'bg-green-100'
+                  }`}>
+                    {file.status === 'uploading' ? (
+                      <svg className="w-5 h-5 text-blue-600 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                    ) : (
+                      <svg className={`w-6 h-6 ${file.status === 'error' ? 'text-red-600' : 'text-green-600'}`} fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clipRule="evenodd" />
+                      </svg>
+                    )}
                   </div>
 
                   {/* File Info */}
                   <div className="flex-1 min-w-0">
                     <p className="font-semibold text-slate-800 truncate">{file.name}</p>
-                    <p className="text-sm text-slate-500">{formatFileSize(file.size)}</p>
+                    <p className="text-sm text-slate-500">
+                      {formatFileSize(file.size)}
+                      {file.status === 'error' && (
+                        <span className="text-red-600 ml-2">— Upload failed</span>
+                      )}
+                      {file.status === 'uploading' && (
+                        <span className="text-blue-600 ml-2">— Uploading...</span>
+                      )}
+                    </p>
                   </div>
                 </div>
 
@@ -286,17 +461,21 @@ function UploadSheets() {
           </div>
 
           {/* Next Steps */}
-          <div className="mt-6 bg-green-50 border border-green-200 rounded-lg p-4">
-            <div className="flex gap-3">
-              <svg className="w-5 h-5 text-green-600 shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-              </svg>
-              <div className="text-sm text-green-800">
-                <p className="font-semibold mb-1">Files ready for processing</p>
-                <p>Proceed to the Rubric Builder to define evaluation criteria, or navigate to Process Evaluation when ready.</p>
+          {realSheets.length > 0 && (
+            <div className="mt-6 flex gap-4">
+              <button
+                onClick={() => navigate(`/evaluation/${evaluationId}/process`)}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg"
+              >
+                Proceed to Process →
+              </button>
+              <div className="flex items-center">
+                <p className="text-sm text-green-700 font-medium">
+                  ✅ {realSheets.length} file(s) ready for processing
+                </p>
               </div>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>

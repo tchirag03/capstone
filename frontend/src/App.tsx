@@ -4,7 +4,6 @@ import Home from './pages/Home'
 import CreateEvaluation from './pages/CreateEvaluation'
 import OpenEvaluation from './pages/OpenEvaluation'
 import UploadSheets from './pages/UploadSheets'
-import RubricBuilder from './pages/RubricBuilder'
 import ProcessEvaluation from './pages/ProcessEvaluation'
 import ResultsOverview from './pages/ResultsOverview'
 import ScriptDetails from './pages/ScriptDetails'
@@ -35,7 +34,6 @@ function App() {
           element={<EvaluationLayout />}
         >
           <Route path="upload" element={<UploadSheets />} />
-          <Route path="rubric" element={<RubricBuilder />} />
           <Route path="process" element={<ProcessEvaluation />} />
           <Route path="results" element={<ResultsOverview />} />
           <Route path="results/:scriptId" element={<ScriptDetails />} />

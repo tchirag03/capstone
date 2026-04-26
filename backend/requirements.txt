@@ -11,3 +11,4 @@ transformers
 Pillow
 accelerate
 reportlab
+mistralai

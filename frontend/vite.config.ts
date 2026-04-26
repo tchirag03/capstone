@@ -15,6 +15,12 @@ export default defineConfig({
     host: true,
     allowedHosts: [
       'erethismic-walton-pretyphoid.ngrok-free.dev'
-    ]
+    ],
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
   }
 });

@@ -2,6 +2,16 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { EvaluationFormData } from '@/types'
+import { post } from '@/api/client'
+
+interface CreateEvaluationApiResponse {
+  id: string
+  name: string
+  subject: string
+  max_marks: number
+  answer_type: string
+  status: string
+}
 
 function CreateEvaluation() {
   const navigate = useNavigate()
@@ -14,6 +24,7 @@ function CreateEvaluation() {
   })
 
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target
@@ -43,18 +54,26 @@ function CreateEvaluation() {
     return Object.keys(newErrors).length === 0
   }
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
 
-    if (validateForm()) {
-      // Generate a simple evaluation ID
-      const evaluationId = `eval-${Date.now()}`
+    if (!validateForm()) return
 
-      // Store evaluation data in localStorage (mock backend)
-      localStorage.setItem(`evaluation-${evaluationId}`, JSON.stringify(formData))
+    setIsSubmitting(true)
+    try {
+      const response = await post<CreateEvaluationApiResponse>('/evaluations', {
+        name: formData.evaluationName.trim(),
+        subject: formData.courseSubject.trim(),
+        max_marks: parseInt(formData.maximumMarks),
+        answer_type: formData.answerType,
+      })
 
-      // Navigate to the upload sheets page
-      navigate(`/evaluation/${evaluationId}/upload`)
+      // Navigate to upload page using the real MongoDB ID
+      navigate(`/evaluation/${response.id}/upload`)
+    } catch (err: any) {
+      setErrors({ submit: err.message || 'Failed to create evaluation' })
+    } finally {
+      setIsSubmitting(false)
     }
   }
 
@@ -153,13 +172,25 @@ function CreateEvaluation() {
             </select>
           </div>
 
+          {/* Server Error */}
+          {errors.submit && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+              <p className="text-sm text-red-700">{errors.submit}</p>
+            </div>
+          )}
+
           {/* Form Actions */}
           <div className="flex gap-4 pt-4">
             <button
               type="submit"
-              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg"
+              disabled={isSubmitting}
+              className={`flex-1 font-semibold py-3 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg ${
+                isSubmitting
+                  ? 'bg-blue-400 cursor-not-allowed text-white'
+                  : 'bg-blue-600 hover:bg-blue-700 text-white'
+              }`}
             >
-              Create Evaluation
+              {isSubmitting ? 'Creating...' : 'Create Evaluation'}
             </button>
             <button
               type="button"

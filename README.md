@@ -60,7 +60,7 @@ All AI inference runs **locally on-device** — no cloud APIs, no data leaves th
 │  │                     Service Layer (AI Models)                   │  │
 │  │  ┌──────────────┐  ┌───────────────────┐  ┌─────────────────┐  │  │
 │  │  │  OCR Service  │  │ Structuring Svc   │  │   SLM Service   │  │  │
-│  │  │  (TrOCR)      │  │ (Regex+Heuristic) │  │  (Qwen2.5-0.5B) │  │  │
+│  │  │ (Mistral OCR) │  │ (Regex+Heuristic) │  │  (Qwen2.5-0.5B) │  │  │
 │  │  └──────────────┘  └───────────────────┘  └─────────────────┘  │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
 │                             │                                        │
@@ -85,16 +85,16 @@ Each stage runs as an **asynchronous background job** with progress tracking and
 
 | Attribute      | Detail |
 |:---------------|:-------|
-| **Model**      | `microsoft/trocr-base-handwritten` (Vision Encoder-Decoder) |
+| **Service**    | Mistral OCR API (`mistral-ocr-latest`) |
 | **Input**      | Uploaded answer sheet image (PNG/JPG) |
-| **Output**     | Raw extracted text string |
-| **Runs on**    | CPU (with optional GPU acceleration) |
+| **Output**     | Markdown-formatted extracted text |
+| **Runs on**    | Cloud (Mistral AI Platform) |
 
 **How it works:**
-1. Image is loaded and preprocessed (RGB conversion, resizing to max 1024px)
-2. TrOCR processor tokenizes the image into pixel values
-3. Vision encoder-decoder model generates text tokens
-4. Decoded text and processing time are stored on the sheet document in MongoDB
+1. Image is read and base64-encoded
+2. Sent to Mistral's `ocr.process()` with `mistral-ocr-latest` model
+3. Markdown text is extracted from all response pages
+4. Extracted text and processing time are stored on the sheet document in MongoDB
 
 ### Stage 2: Text Structuring — Q&A Parsing
 
@@ -158,8 +158,9 @@ Each stage runs as an **asynchronous background job** with progress tracking and
 | **Pydantic** | Request/response validation and serialization |
 | **MongoDB** (Motor) | Document database for evaluations, sheets, results |
 | **Redis** | Caching layer and background job queue |
-| **PyTorch** | Deep learning runtime for OCR and SLM |
-| **Transformers** (HuggingFace) | Model loading and inference pipeline |
+| **Mistral OCR** | Cloud OCR API for handwritten text extraction |
+| **PyTorch** | Deep learning runtime for SLM |
+| **Transformers** (HuggingFace) | Model loading and inference pipeline (SLM) |
 | **Pillow** | Image preprocessing |
 | **ReportLab** | PDF report generation |
 
@@ -325,13 +326,13 @@ The backend follows a **three-layer architecture**:
 1. connect_db()              # MongoDB connection via Motor
 2. connect_redis()           # Redis connection
 3. ensure_indexes()          # Create MongoDB indexes
-4. init_ocr_service()        # Load TrOCR model (~800MB)
+4. init_ocr_service()        # Mistral OCR client
 5. init_structuring_service() # Initialize regex parser
 6. init_slm_service()        # Load Qwen2.5-0.5B (~1GB)
 7. start_worker()            # Redis job queue consumer
 ```
 
-All three AI models are loaded **once at startup** and reused across all requests via the singleton pattern. This avoids the overhead of loading multi-hundred-MB models per request.
+The Mistral OCR client and the SLM model are initialised **once at startup** and reused across all requests via the singleton pattern.
 
 ### Background Job Pattern
 
@@ -513,9 +514,11 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-The first run will download AI models (~1.8GB total):
-- TrOCR (~800MB)
+The first run will download the SLM model (~1GB):
 - Qwen2.5-0.5B (~1GB)
+
+> **Note:** OCR uses the Mistral OCR API. Set your `MISTRAL_API_KEY`
+> in the `backend/.env` file.
 
 Server starts at: `http://localhost:8000`
 
@@ -540,8 +543,9 @@ MONGO_URI=mongodb://localhost:27017
 DB_NAME=evaluation_db
 REDIS_HOST=localhost
 REDIS_PORT=6379
+MISTRAL_API_KEY=your_mistral_api_key_here
 ```
 
 ---
 
-**Status**: Full pipeline implemented — OCR ✅ | Structuring ✅ | SLM Evaluation ✅ | Results ✅ | Export ✅
+**Status**: Full pipeline implemented — OCR (Mistral OCR) ✅ | Structuring ✅ | SLM Evaluation ✅ | Results ✅ | Export ✅

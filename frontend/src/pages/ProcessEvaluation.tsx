@@ -1,88 +1,258 @@
-import { useState, useEffect } from 'react'
-import { useParams } from 'react-router-dom'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
 import type { StageStatus, EvaluationStage, EvaluationStatus } from '@/types'
+import { get, post } from '@/api/client'
+
+// Backend response types
+interface EvaluationApiResponse {
+  id: string
+  name: string
+  subject: string
+  max_marks: number
+  answer_type: string
+  status: string
+}
+
+interface StartJobResponse {
+  success: boolean
+  job_id: string
+  message: string
+  total_sheets: number
+}
+
+interface StatusResponse {
+  status: string
+  progress: {
+    total: number
+    completed: number
+    failed: number
+    percentage: number
+  }
+  started_at?: string
+  completed_at?: string
+  error?: string
+}
+
+interface ListSheetsResponse {
+  success: boolean
+  sheets: { id: string; status: string }[]
+}
+
+// Pipeline stage config for the three stages
+const STAGE_CONFIG = [
+  {
+    id: 'ocr',
+    name: 'OCR Processing',
+    description: 'Extracting text from scanned answer sheets using Mistral OCR',
+    startPath: (evalId: string) => `/evaluations/${evalId}/ocr/start`,
+    statusPath: (evalId: string) => `/evaluations/${evalId}/ocr/status`,
+  },
+  {
+    id: 'structuring',
+    name: 'Text Structuring',
+    description: 'Organizing extracted text into structured Q&A format',
+    startPath: (evalId: string) => `/evaluations/${evalId}/structuring/start`,
+    statusPath: (evalId: string) => `/evaluations/${evalId}/structuring/status`,
+  },
+  {
+    id: 'scoring',
+    name: 'Rubric-Based Scoring',
+    description: 'Evaluating answers against rubric criteria using SLM',
+    startPath: (evalId: string) => `/evaluations/${evalId}/evaluation/start`,
+    statusPath: (evalId: string) => `/evaluations/${evalId}/evaluation/status`,
+  },
+] as const
 
 function ProcessEvaluation() {
   const { evaluationId } = useParams<{ evaluationId: string }>()
+  const navigate = useNavigate()
 
-  // Mock evaluation data (would come from API/database)
-  const [evaluationName] = useState('Final Exam 2024')
-  const [totalScripts] = useState(45)
+  const [evaluationName, setEvaluationName] = useState('Loading...')
+  const [totalScripts, setTotalScripts] = useState(0)
   const [evaluationStatus, setEvaluationStatus] = useState<EvaluationStatus>('not-started')
+  const [error, setError] = useState<string | null>(null)
 
-  // Three pipeline stages
-  const [stages, setStages] = useState<EvaluationStage[]>([
-    {
-      id: 'ocr',
-      name: 'OCR Processing',
-      description: 'Extracting text from scanned answer sheets',
-      status: 'pending',
+  // Pipeline stages
+  const [stages, setStages] = useState<EvaluationStage[]>(
+    STAGE_CONFIG.map((cfg) => ({
+      id: cfg.id,
+      name: cfg.name,
+      description: cfg.description,
+      status: 'pending' as StageStatus,
       progress: 0,
+    }))
+  )
+
+  // Refs to avoid stale closures in polling
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const currentStageRef = useRef(0)
+
+  // Update a specific stage
+  const updateStage = useCallback((stageIndex: number, updates: Partial<EvaluationStage>) => {
+    setStages((prev) => {
+      const copy = [...prev]
+      copy[stageIndex] = { ...copy[stageIndex], ...updates }
+      return copy
+    })
+  }, [])
+
+  // Start a specific pipeline stage
+  const startStage = useCallback(
+    async (stageIndex: number) => {
+      if (!evaluationId) return
+
+      const cfg = STAGE_CONFIG[stageIndex]
+      updateStage(stageIndex, { status: 'in-progress', progress: 0 })
+
+      try {
+        await post<StartJobResponse>(cfg.startPath(evaluationId))
+        // eslint-disable-next-line @typescript-eslint/no-use-before-define
+        pollStage(stageIndex)
+      } catch (err: any) {
+        updateStage(stageIndex, { status: 'error', progress: 0 })
+        setEvaluationStatus('error')
+        setError(`Failed to start "${cfg.name}": ${err.message}`)
+      }
     },
-    {
-      id: 'structuring',
-      name: 'Text Structuring',
-      description: 'Organizing extracted text into structured data',
-      status: 'pending',
-      progress: 0,
-    },
-    {
-      id: 'scoring',
-      name: 'Rubric-Based Scoring',
-      description: 'Evaluating answers against rubric criteria',
-      status: 'pending',
-      progress: 0,
-    },
-  ])
+    [evaluationId, updateStage] // omitting pollStage to avoid circular dependency loop
+  )
 
-  // Simulated processing
-  useEffect(() => {
-    if (evaluationStatus !== 'processing') return
+  // Poll a stage's status, then auto-trigger the next stage when done
+  const pollStage = useCallback(
+    (stageIndex: number) => {
+      if (!evaluationId) return
 
-    let currentStageIndex = 0
-    const stageIds = ['ocr', 'structuring', 'scoring']
+      const cfg = STAGE_CONFIG[stageIndex]
 
-    const interval = setInterval(() => {
-      setStages(prevStages => {
-        const newStages = [...prevStages]
-        const currentStage = newStages[currentStageIndex]
+      pollingRef.current = setInterval(async () => {
+        try {
+          const status = await get<StatusResponse>(cfg.statusPath(evaluationId))
+          const pct = status.progress.percentage
 
-        if (currentStage.progress < 100) {
-          // Update progress for current stage
-          currentStage.progress = Math.min(currentStage.progress + 10, 100)
-          currentStage.status = 'in-progress'
-        } else if (currentStage.progress === 100) {
-          // Mark current stage as completed
-          currentStage.status = 'completed'
+          updateStage(stageIndex, {
+            progress: pct,
+            status: 'in-progress',
+          })
 
-          // Move to next stage
-          currentStageIndex++
-          if (currentStageIndex < stageIds.length) {
-            newStages[currentStageIndex].status = 'in-progress'
-            newStages[currentStageIndex].progress = 0
-          } else {
-            // All stages completed
-            setEvaluationStatus('completed')
-            clearInterval(interval)
+          // Check if stage is done
+          if (status.status === 'completed' || status.status === 'failed') {
+            clearInterval(pollingRef.current!)
+            pollingRef.current = null
+
+            if (status.status === 'failed') {
+              updateStage(stageIndex, { status: 'error', progress: pct })
+              setEvaluationStatus('error')
+              setError(`Stage "${cfg.name}" failed. ${status.error || ''}`)
+              return
+            }
+
+            // Mark completed
+            updateStage(stageIndex, { status: 'completed', progress: 100 })
+
+            // Trigger next stage
+            const nextIndex = stageIndex + 1
+            if (nextIndex < STAGE_CONFIG.length) {
+              currentStageRef.current = nextIndex
+              await startStage(nextIndex)
+            } else {
+              // All stages done!
+              setEvaluationStatus('completed')
+            }
           }
+        } catch (err: any) {
+          // Don't crash on transient network errors during polling
+          console.warn('Polling error:', err.message)
+        }
+      }, 2000)
+    },
+    [evaluationId, updateStage, startStage],
+  )
+
+  // Fetch evaluation info and resume polling on mount
+  useEffect(() => {
+    if (!evaluationId) return
+    const load = async () => {
+      try {
+        const eval_ = await get<EvaluationApiResponse>(`/evaluations/${evaluationId}`)
+        setEvaluationName(eval_.name)
+
+        const sheets = await get<ListSheetsResponse>(`/evaluations/${evaluationId}/sheets`)
+        setTotalScripts(sheets.sheets.length)
+
+        if (sheets.sheets.length === 0) {
+          setError('No sheets uploaded yet. Go back and upload answer sheets first.')
+          return
         }
 
-        return newStages
-      })
-    }, 500) // Update every 500ms
+        // Fetch status for all three stages
+        const [ocrStatus, structStatus, slmStatus] = await Promise.all([
+          get<StatusResponse>(STAGE_CONFIG[0].statusPath(evaluationId)),
+          get<StatusResponse>(STAGE_CONFIG[1].statusPath(evaluationId)),
+          get<StatusResponse>(STAGE_CONFIG[2].statusPath(evaluationId))
+        ])
 
-    return () => clearInterval(interval)
-  }, [evaluationStatus])
+        const statuses = [ocrStatus, structStatus, slmStatus]
+        let activeStageIndex = -1
+        let allCompleted = true
 
-  // Start evaluation handler
-  const handleStartEvaluation = () => {
+        setStages(prev => prev.map((stage, idx) => {
+          const s = statuses[idx]
+          if (s.status === 'running') {
+            activeStageIndex = idx
+            allCompleted = false
+          } else if (s.status !== 'completed') {
+            allCompleted = false
+          }
+          return {
+            ...stage,
+            status: s.status as StageStatus,
+            progress: s.progress?.percentage || 0
+          }
+        }))
+
+        if (activeStageIndex !== -1) {
+          setEvaluationStatus('processing')
+          currentStageRef.current = activeStageIndex
+          pollStage(activeStageIndex)
+        } else if (allCompleted) {
+          setEvaluationStatus('completed')
+        }
+
+      } catch (err: any) {
+        setError(err.message || 'Failed to load evaluation')
+      }
+    }
+    load()
+  }, [evaluationId, pollStage])
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current)
+    }
+  }, [])
+
+
+
+  // Start the full evaluation pipeline
+  const handleStartEvaluation = async () => {
     setEvaluationStatus('processing')
+    setError(null)
+    currentStageRef.current = 0
+
     // Reset all stages
-    setStages(stages.map((stage, index) => ({
-      ...stage,
-      status: index === 0 ? 'in-progress' : 'pending',
-      progress: 0,
-    })))
+    setStages(
+      STAGE_CONFIG.map((cfg) => ({
+        id: cfg.id,
+        name: cfg.name,
+        description: cfg.description,
+        status: 'pending' as StageStatus,
+        progress: 0,
+      }))
+    )
+
+    // Start the first stage (OCR)
+    await startStage(0)
   }
 
   // Get status badge styling
@@ -119,6 +289,13 @@ function ProcessEvaluation() {
         </svg>
       )
     }
+    if (stage.status === 'error') {
+      return (
+        <svg className="w-8 h-8 text-red-600" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+        </svg>
+      )
+    }
     return (
       <svg className="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -132,7 +309,7 @@ function ProcessEvaluation() {
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-slate-800 mb-2">Process Evaluation</h1>
         <p className="text-slate-600">
-          Initiate and monitor the evaluation pipeline for ID: <span className="font-semibold text-slate-800">{evaluationId}</span>
+          Run the AI pipeline for: <span className="font-semibold text-slate-800">{evaluationName}</span>
         </p>
       </div>
 
@@ -150,6 +327,18 @@ function ProcessEvaluation() {
         </div>
       </div>
 
+      {/* Error Banner */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-8">
+          <div className="flex items-center gap-2">
+            <svg className="w-5 h-5 text-red-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+            </svg>
+            <p className="text-sm text-red-800">{error}</p>
+          </div>
+        </div>
+      )}
+
       {/* Control Panel */}
       <div className="bg-white border-2 border-slate-200 rounded-lg p-6 mb-8">
         <div className="flex items-center justify-between">
@@ -158,29 +347,38 @@ function ProcessEvaluation() {
             <p className="text-sm text-slate-600">
               {evaluationStatus === 'not-started' && 'Ready to start evaluation process'}
               {evaluationStatus === 'processing' && 'Evaluation in progress...'}
-              {evaluationStatus === 'completed' && 'Evaluation completed successfully'}
+              {evaluationStatus === 'completed' && 'Evaluation completed successfully!'}
+              {evaluationStatus === 'error' && 'An error occurred during processing'}
             </p>
           </div>
 
           <button
             onClick={handleStartEvaluation}
-            disabled={evaluationStatus === 'completed' || evaluationStatus === 'processing'}
-            className={`px-8 py-3 rounded-lg font-semibold transition-all duration-200 ${evaluationStatus === 'completed' || evaluationStatus === 'processing'
+            disabled={evaluationStatus === 'completed' || evaluationStatus === 'processing' || totalScripts === 0}
+            className={`px-8 py-3 rounded-lg font-semibold transition-all duration-200 ${evaluationStatus === 'completed' || evaluationStatus === 'processing' || totalScripts === 0
               ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
               : 'bg-blue-600 hover:bg-blue-700 text-white shadow-md hover:shadow-lg'
               }`}
           >
-            {evaluationStatus === 'processing' ? 'Processing...' : evaluationStatus === 'completed' ? 'Completed' : 'Start Evaluation'}
+            {evaluationStatus === 'processing' ? 'Processing...' : evaluationStatus === 'completed' ? 'Completed ✓' : evaluationStatus === 'error' ? 'Retry' : 'Start Evaluation'}
           </button>
         </div>
 
         {evaluationStatus === 'completed' && (
           <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-4">
-            <div className="flex items-center gap-2">
-              <svg className="w-5 h-5 text-green-600" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-              </svg>
-              <p className="text-sm font-semibold text-green-800">Evaluation already completed</p>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <svg className="w-5 h-5 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                </svg>
+                <p className="text-sm font-semibold text-green-800">All stages completed successfully!</p>
+              </div>
+              <button
+                onClick={() => navigate(`/evaluation/${evaluationId}/results`)}
+                className="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-lg transition-colors text-sm"
+              >
+                View Results →
+              </button>
             </div>
           </div>
         )}
@@ -251,7 +449,7 @@ function ProcessEvaluation() {
       </div>
 
       {/* Info Box */}
-      {evaluationStatus === 'not-started' && (
+      {evaluationStatus === 'not-started' && totalScripts > 0 && (
         <div className="mt-8 bg-blue-50 border border-blue-200 rounded-lg p-4">
           <div className="flex gap-3">
             <svg className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
@@ -259,7 +457,7 @@ function ProcessEvaluation() {
             </svg>
             <div className="text-sm text-blue-800">
               <p className="font-semibold mb-1">Processing Pipeline</p>
-              <p>The evaluation will proceed through three stages: OCR extraction, text structuring, and AI-based scoring. This process may take several minutes depending on the number of scripts.</p>
+              <p>The evaluation will proceed through three stages: Mistral OCR extraction, text structuring, and AI-based scoring. This process may take several minutes depending on the number of scripts.</p>
             </div>
           </div>
         </div>
