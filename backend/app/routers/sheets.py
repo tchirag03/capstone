@@ -154,6 +154,30 @@ async def upload_rubric(
 
 
 # ---------------------------------------------------------------------------
+# GET  /evaluations/{evaluation_id}/rubric
+# ---------------------------------------------------------------------------
+@router.get(
+    "/evaluations/{evaluation_id}/rubric",
+)
+async def get_rubric(evaluation_id: str):
+    """Get the rubric metadata for an evaluation."""
+    db = get_database()
+    doc = await db.rubrics.find_one({"evaluation_id": evaluation_id})
+
+    if not doc:
+        return {"success": False, "message": "No rubric found"}
+
+    return {
+        "success": True,
+        "rubric": {
+            "name": doc.get("file_name", "Unknown"),
+            "size": doc.get("file_size", 0),
+            "status": "uploaded",
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
 # GET  /evaluations/{evaluation_id}/sheets  —  list uploaded sheets
 # ---------------------------------------------------------------------------
 @router.get(
@@ -208,3 +232,33 @@ async def delete_sheet(evaluation_id: str, sheet_id: str):
         success=True,
         message=f"Sheet '{doc['file_name']}' deleted successfully",
     )
+
+
+# ---------------------------------------------------------------------------
+# DELETE  /evaluations/{evaluation_id}/rubric
+# ---------------------------------------------------------------------------
+@router.delete(
+    "/evaluations/{evaluation_id}/rubric",
+)
+async def delete_rubric(evaluation_id: str):
+    """Delete the rubric for an evaluation — removes file from disk and metadata from MongoDB."""
+    db = get_database()
+
+    doc = await db.rubrics.find_one({"evaluation_id": evaluation_id})
+    if not doc:
+        return {"success": True, "message": "No rubric found to delete"}
+
+    # Remove file from disk
+    file_path = doc.get("file_path", "")
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except Exception as e:
+            print(f"Error removing rubric file: {e}")
+
+    await db.rubrics.delete_one({"evaluation_id": evaluation_id})
+
+    return {
+        "success": True,
+        "message": "Rubric deleted successfully",
+    }

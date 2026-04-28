@@ -1,52 +1,64 @@
 """
-OCR Service using Microsoft TrOCR (trocr-base-handwritten).
+OCR Service using Mistral OCR API (mistral-ocr-latest).
+
+Uses the Mistral AI platform's dedicated OCR model for handwritten
+and printed text extraction from answer sheet images.
 
 Design principles:
-  • Modular — independent service, can swap model later
-  • Efficient — model loaded ONCE, reused across requests
+  • Modular — independent service, same interface as before
+  • Efficient — Mistral client initialised ONCE, reused across requests
   • Stateless — no internal storage, returns extracted text
 """
+import base64
+import mimetypes
 import time
 from pathlib import Path
 
-from PIL import Image
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+from mistralai import Mistral
+
+from app.core.config import settings
 
 
 class OCRService:
-    """Handwritten text extraction using TrOCR."""
+    """Handwritten text extraction using Mistral OCR API."""
 
-    MODEL_NAME = "microsoft/trocr-base-handwritten"
+    MODEL = "mistral-ocr-latest"
 
     def __init__(self) -> None:
-        """Load the TrOCR processor and model (called once at startup)."""
-        print(f"[OCR] Loading model '{self.MODEL_NAME}' …")
-        self.processor = TrOCRProcessor.from_pretrained(self.MODEL_NAME)
-        self.model = VisionEncoderDecoderModel.from_pretrained(self.MODEL_NAME)
-        self.model.eval()  # inference mode
-        print("[OCR] Model loaded successfully.")
+        """Initialise the Mistral client with the API key from settings."""
+        api_key = settings.mistral_api_key
+        if not api_key:
+            print("[OCR] ⚠ MISTRAL_API_KEY not set — OCR will fail at runtime.")
+            self.client = None
+            return
+
+        print("[OCR] Initialising Mistral OCR client …")
+        self.client = Mistral(api_key=api_key)
+        print("[OCR] Mistral OCR client ready.")
 
     # ------------------------------------------------------------------
-    # Preprocessing
+    # Helpers
     # ------------------------------------------------------------------
-    def preprocess(self, image: Image.Image) -> Image.Image:
-        """Basic preprocessing: ensure RGB and reasonable size."""
-        # Convert to RGB (handles grayscale / RGBA)
-        if image.mode != "RGB":
-            image = image.convert("RGB")
+    @staticmethod
+    def _encode_image(image_path: Path) -> tuple[str, str]:
+        """Read an image file and return (base64_data, mime_type)."""
+        mime_type, _ = mimetypes.guess_type(str(image_path))
+        if mime_type is None:
+            mime_type = "image/png"  # safe default
 
-        # Resize very large images to avoid OOM (keep aspect ratio)
-        max_side = 1024
-        if max(image.size) > max_side:
-            image.thumbnail((max_side, max_side), Image.LANCZOS)
+        with open(image_path, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode("utf-8")
 
-        return image
+        return b64, mime_type
 
     # ------------------------------------------------------------------
     # Core extraction
     # ------------------------------------------------------------------
     def extract_text(self, image_path: str) -> dict:
-        """Extract handwritten text from an image file.
+        """Extract handwritten text from an image via Mistral OCR.
+
+        The image is base64-encoded and sent as a ``data:`` URL to the
+        ``mistral-ocr-latest`` model.
 
         Args:
             image_path: Absolute path to a PNG/JPG image.
@@ -55,32 +67,48 @@ class OCRService:
             dict with keys: text, confidence, processing_time_ms
 
         Raises:
-            FileNotFoundError: if image_path does not exist.
-            ValueError: if the file is not a valid image.
+            FileNotFoundError: if *image_path* does not exist.
+            RuntimeError: if the Mistral client is unavailable or the
+                API returns an error.
         """
+        if self.client is None:
+            raise RuntimeError(
+                "Mistral OCR client not initialised.  "
+                "Set MISTRAL_API_KEY in your .env file."
+            )
+
         path = Path(image_path)
         if not path.exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
 
         t0 = time.perf_counter()
 
-        try:
-            image = Image.open(path)
-        except Exception as exc:
-            raise ValueError(f"Cannot open image '{path.name}': {exc}") from exc
+        # Encode the image to base64
+        b64_data, mime_type = self._encode_image(path)
+        image_url = f"data:{mime_type};base64,{b64_data}"
 
-        image = self.preprocess(image)
+        # Call Mistral OCR
+        ocr_response = self.client.ocr.process(
+            model=self.MODEL,
+            document={
+                "type": "image_url",
+                "image_url": image_url,
+            },
+            include_image_base64=True,
+        )
 
-        # Tokenize / generate
-        pixel_values = self.processor(images=image, return_tensors="pt").pixel_values
-        generated_ids = self.model.generate(pixel_values, max_new_tokens=256)
-        text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        # Extract markdown text from all pages
+        pages_text = []
+        for page in ocr_response.pages:
+            if page.markdown:
+                pages_text.append(page.markdown)
+
+        text = "\n\n".join(pages_text)
 
         elapsed_ms = round((time.perf_counter() - t0) * 1000)
 
-        # TrOCR doesn't natively return a confidence score.
-        # We approximate it from generation log-probs in the future;
-        # for now, report -1 to signal "not available".
+        # Mistral OCR doesn't return a confidence score;
+        # report -1 to signal "not available"
         return {
             "text": text.strip(),
             "confidence": -1,
@@ -97,7 +125,9 @@ _instance: OCRService | None = None
 def get_ocr_service() -> OCRService:
     """Return the OCR service singleton. Raises if not initialised."""
     if _instance is None:
-        raise RuntimeError("OCRService not initialised — call init_ocr_service() first.")
+        raise RuntimeError(
+            "OCRService not initialised — call init_ocr_service() first."
+        )
     return _instance
 
 

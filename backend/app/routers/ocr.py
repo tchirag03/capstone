@@ -1,6 +1,7 @@
 """
 OCR processing API routes.
-Runs TrOCR extraction on uploaded answer sheets and stores results in MongoDB.
+Runs Mistral OCR text extraction on uploaded answer sheets
+and stores results in MongoDB.
 """
 import asyncio
 import uuid
@@ -11,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.core.mongodb import get_database
 from app.services.ocr_service import get_ocr_service
+from app.services.structuring_service import get_structuring_service
 from app.schemas.common import (
     OCRStartResponse,
     OCRStatusResponse,
@@ -105,7 +107,7 @@ async def _process_ocr_batch(
     evaluation_id: str,
     sheets: list[dict],
 ) -> None:
-    """Process each sheet through TrOCR sequentially in a background task."""
+    """Process each sheet through Mistral OCR sequentially in a background task."""
     db = get_database()
     ocr = get_ocr_service()
     completed = 0
@@ -122,7 +124,7 @@ async def _process_ocr_batch(
                 {"$set": {"status": "ocr-processing"}},
             )
 
-            # Run CPU-bound TrOCR in a thread so we don't block the event loop
+            # Run Mistral OCR call in a thread so we don't block the event loop
             result = await asyncio.to_thread(ocr.extract_text, file_path)
 
             # Store result on the sheet document
@@ -227,12 +229,21 @@ async def get_ocr_result(evaluation_id: str, sheet_id: str):
     status = doc.get("status", "uploaded")
 
     # Map sheet status to processing status for the response
-    if status == "ocr-completed":
+    if "ocr_text" in doc:
+        raw_text = doc.get("ocr_text", "")
+        
+        # Clean the text for the UI to show what the SLM actually sees (no raw LaTeX)
+        try:
+            svc = get_structuring_service()
+            display_text = svc.clean_ocr_text(raw_text)
+        except Exception:
+            display_text = raw_text
+
         return OCRResultResponse(
             sheet_id=sheet_id,
             status="completed",
             result=OCRResultDetail(
-                extracted_text=doc.get("ocr_text", ""),
+                extracted_text=display_text,
                 confidence=doc.get("ocr_confidence", -1),
                 processing_time=doc.get("ocr_processing_time_ms", 0),
             ),

@@ -109,7 +109,7 @@ backend/
 This is a **contract-only scaffold**. The following are **deliberately excluded**:
 
 - ❌ OCR / AI / ML logic
-- ❌ Database connections
+- ❌ Database conn ections
 - ❌ File storage
 - ❌ Authentication
 - ❌ Background workers

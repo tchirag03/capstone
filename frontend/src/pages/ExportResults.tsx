@@ -1,42 +1,99 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
-import type { ExportFormat, ExportScope } from '@/types'
+import type { ExportFormat } from '@/types'
+import { get } from '@/api/client'
+
+// Minimal interface for an Evaluation
+interface EvaluationDetails {
+  name: string
+}
+
+interface ListSheetsApiResponse {
+  success: boolean
+  sheets: { id: string; status: string }[]
+}
 
 function ExportResults() {
   const { evaluationId } = useParams<{ evaluationId: string }>()
 
   // State management
   const [selectedFormat, setSelectedFormat] = useState<ExportFormat>('csv')
-  const [selectedScope, setSelectedScope] = useState<ExportScope>('entire')
   const [isExporting, setIsExporting] = useState(false)
   const [exportComplete, setExportComplete] = useState(false)
   const [exportLocation, setExportLocation] = useState('')
+  const [error, setError] = useState<string | null>(null)
 
-  // Mock evaluation data
-  const [evaluationName] = useState('Final Exam 2024')
-  const [totalScripts] = useState(45)
+  // Real data
+  const [evaluationName, setEvaluationName] = useState('Loading...')
+  const [totalScripts, setTotalScripts] = useState(0)
 
-  // Handle export action
+  useEffect(() => {
+    if (!evaluationId) return
+
+    const loadData = async () => {
+      try {
+        const evalDetails = await get<EvaluationDetails>(`/evaluations/${evaluationId}`)
+        setEvaluationName(evalDetails.name)
+
+        const sheetsData = await get<ListSheetsApiResponse>(`/evaluations/${evaluationId}/sheets`)
+        const completed = sheetsData.sheets.filter(s => s.status === 'evaluation-completed').length
+        setTotalScripts(completed)
+      } catch (err: any) {
+        console.error('Failed to load details for export:', err)
+      }
+    }
+
+    loadData()
+  }, [evaluationId])
+
+  // Handle actual file export via backend
   const handleExport = async () => {
+    if (!evaluationId) return
+
     setIsExporting(true)
     setExportComplete(false)
+    setError(null)
 
-    // Simulate export process with delay
-    await new Promise(resolve => setTimeout(resolve, 2000))
+    try {
+      // We use raw fetch here instead of api client because we need a Blob, not JSON
+      const response = await fetch(`/api/evaluations/${evaluationId}/export/${selectedFormat}`, {
+        method: 'POST',
+      })
 
-    // Generate mock file location
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
-    const formatExt = selectedFormat.toUpperCase()
-    const scopeLabel = selectedScope === 'entire' ? 'Complete' : 'Individual_Scripts'
-    const fileName = `${evaluationName.replace(/\s+/g, '_')}_${scopeLabel}_Results_${timestamp}.${selectedFormat}`
-    const mockLocation = `C:\\Users\\Downloads\\${fileName}`
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}))
+        throw new Error(errData.detail || errData.message || 'Export failed on the server')
+      }
 
-    setExportLocation(mockLocation)
-    setIsExporting(false)
-    setExportComplete(true)
+      // Convert response to blob
+      const blob = await response.blob()
 
-    // TODO: Replace with actual file generation logic
-    // Example: Generate CSV or PDF file and trigger download
+      // Create a URL for the blob
+      const url = window.URL.createObjectURL(blob)
+
+      // Safely format the filename
+      const safeName = evaluationName.replace(/[^a-z0-9]/gi, '_').toLowerCase()
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 10)
+      const fileName = `${safeName}_results_${timestamp}.${selectedFormat}`
+
+      // Create a temporary link element to trigger the download
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+
+      // Cleanup
+      document.body.removeChild(a)
+      window.URL.revokeObjectURL(url)
+
+      setExportLocation(fileName)
+      setExportComplete(true)
+    } catch (err: any) {
+      setError(err.message || 'An unexpected error occurred during export')
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   // Get format icon
@@ -75,21 +132,31 @@ function ExportResults() {
           </div>
           <div>
             <p className="text-sm text-slate-500 mb-1">Evaluation ID</p>
-            <p className="font-semibold text-slate-800">{evaluationId}</p>
+            <p className="font-semibold text-slate-800 font-mono text-sm">{evaluationId}</p>
           </div>
           <div>
-            <p className="text-sm text-slate-500 mb-1">Total Scripts</p>
+            <p className="text-sm text-slate-500 mb-1">Evaluated Scripts</p>
             <p className="font-semibold text-slate-800">{totalScripts} answer sheets</p>
           </div>
         </div>
       </div>
+
+      {/* Error Message */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-8 flex items-center gap-3">
+          <svg className="w-5 h-5 text-red-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+          </svg>
+          <p className="text-sm text-red-800 font-medium">{error}</p>
+        </div>
+      )}
 
       {/* Export Configuration */}
       <div className="bg-white border-2 border-slate-200 rounded-lg p-6 mb-8">
         <h2 className="text-xl font-bold text-slate-800 mb-6">Export Configuration</h2>
 
         {/* Format Selection */}
-        <div className="mb-8">
+        <div>
           <label className="block text-sm font-semibold text-slate-700 mb-3">
             Export Format
           </label>
@@ -115,7 +182,7 @@ function ExportResults() {
                 </div>
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="font-bold text-slate-800">CSV Format</span>
+                    <span className="font-bold text-slate-800">CSV Spreadsheet</span>
                     {selectedFormat === 'csv' && (
                       <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
                         <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
@@ -123,10 +190,10 @@ function ExportResults() {
                     )}
                   </div>
                   <p className="text-sm text-slate-600">
-                    Spreadsheet format with marks only. Best for data analysis and grade processing.
+                    Spreadsheet format with aggregated marks. Best for uploading grades to external systems.
                   </p>
                   <div className="mt-2 text-xs text-slate-500">
-                    Includes: Roll No, Student Name, Total Marks, Percentage
+                    Includes: File Name, Total Marks, Percentage, Grade
                   </div>
                 </div>
               </div>
@@ -153,7 +220,7 @@ function ExportResults() {
                 </div>
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="font-bold text-slate-800">PDF Format</span>
+                    <span className="font-bold text-slate-800">PDF Report</span>
                     {selectedFormat === 'pdf' && (
                       <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
                         <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
@@ -161,90 +228,11 @@ function ExportResults() {
                     )}
                   </div>
                   <p className="text-sm text-slate-600">
-                    Professional document with marks and detailed feedback. Printable and shareable.
+                    Professional document with marks and tabular overview. Printable and shareable.
                   </p>
                   <div className="mt-2 text-xs text-slate-500">
-                    Includes: Complete scores, AI feedback, rubric breakdown
+                    Includes: Consolidated evaluation summary table
                   </div>
-                </div>
-              </div>
-            </label>
-          </div>
-        </div>
-
-        {/* Scope Selection */}
-        <div>
-          <label className="block text-sm font-semibold text-slate-700 mb-3">
-            Export Scope
-          </label>
-          <div className="grid md:grid-cols-2 gap-4">
-            {/* Entire Evaluation */}
-            <label
-              className={`border-2 rounded-lg p-4 cursor-pointer transition-all duration-200 ${selectedScope === 'entire'
-                ? 'border-blue-600 bg-blue-50'
-                : 'border-slate-200 hover:border-slate-300'
-                }`}
-            >
-              <input
-                type="radio"
-                name="scope"
-                value="entire"
-                checked={selectedScope === 'entire'}
-                onChange={(e) => setSelectedScope(e.target.value as ExportScope)}
-                className="sr-only"
-              />
-              <div className="flex items-start gap-3">
-                <svg className={`w-6 h-6 ${selectedScope === 'entire' ? 'text-blue-600' : 'text-slate-400'}`} fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                  <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm9.707 5.707a1 1 0 00-1.414-1.414L9 12.586l-1.293-1.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                </svg>
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="font-bold text-slate-800">Entire Evaluation</span>
-                    {selectedScope === 'entire' && (
-                      <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                      </svg>
-                    )}
-                  </div>
-                  <p className="text-sm text-slate-600">
-                    Single file with all {totalScripts} students' results
-                  </p>
-                </div>
-              </div>
-            </label>
-
-            {/* Individual Scripts */}
-            <label
-              className={`border-2 rounded-lg p-4 cursor-pointer transition-all duration-200 ${selectedScope === 'individual'
-                ? 'border-blue-600 bg-blue-50'
-                : 'border-slate-200 hover:border-slate-300'
-                }`}
-            >
-              <input
-                type="radio"
-                name="scope"
-                value="individual"
-                checked={selectedScope === 'individual'}
-                onChange={(e) => setSelectedScope(e.target.value as ExportScope)}
-                className="sr-only"
-              />
-              <div className="flex items-start gap-3">
-                <svg className={`w-6 h-6 ${selectedScope === 'individual' ? 'text-blue-600' : 'text-slate-400'}`} fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
-                </svg>
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="font-bold text-slate-800">Individual Scripts</span>
-                    {selectedScope === 'individual' && (
-                      <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                      </svg>
-                    )}
-                  </div>
-                  <p className="text-sm text-slate-600">
-                    Separate file for each student (ZIP archive)
-                  </p>
                 </div>
               </div>
             </label>
@@ -254,15 +242,14 @@ function ExportResults() {
 
       {/* Export Action */}
       <div className="flex items-center justify-between mb-8">
-        <div className="text-sm text-slate-600">
-          {selectedFormat === 'csv' ? '📊 CSV' : '📄 PDF'} •
-          {selectedScope === 'entire' ? ` ${totalScripts} students in 1 file` : ` ${totalScripts} separate files`}
+        <div className="text-sm text-slate-600 font-medium">
+          {selectedFormat === 'csv' ? '📊 CSV' : '📄 PDF'} format • 1 file containing {totalScripts} student records
         </div>
 
         <button
           onClick={handleExport}
-          disabled={isExporting}
-          className={`px-8 py-3 rounded-lg font-semibold transition-all duration-200 flex items-center gap-2 ${isExporting
+          disabled={isExporting || totalScripts === 0}
+          className={`px-8 py-3 rounded-lg font-semibold transition-all duration-200 flex items-center gap-2 ${isExporting || totalScripts === 0
             ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
             : 'bg-blue-600 hover:bg-blue-700 text-white shadow-md hover:shadow-lg'
             }`}
@@ -288,23 +275,20 @@ function ExportResults() {
 
       {/* Success Message */}
       {exportComplete && (
-        <div className="bg-green-50 border-2 border-green-200 rounded-lg p-6 mb-8 animate-fadeIn">
+        <div className="bg-green-50 border-2 border-green-200 rounded-lg p-6 mb-8">
           <div className="flex items-start gap-3">
             <svg className="w-6 h-6 text-green-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
             </svg>
             <div className="flex-1">
-              <h3 className="text-lg font-bold text-green-800 mb-2">Export Successful!</h3>
+              <h3 className="text-lg font-bold text-green-800 mb-2">Export Downloaded Successfully!</h3>
               <p className="text-sm text-green-700 mb-3">
-                Your {selectedFormat.toUpperCase()} file{selectedScope === 'individual' ? 's have' : ' has'} been generated and saved.
+                Your {selectedFormat.toUpperCase()} file has been generated and saved to your Downloads folder.
               </p>
-              <div className="bg-white border border-green-200 rounded p-3 mb-3">
-                <p className="text-xs text-slate-500 mb-1">Export Location:</p>
+              <div className="bg-white border border-green-200 rounded p-3">
+                <p className="text-xs text-slate-500 mb-1">File Name:</p>
                 <p className="text-sm font-mono text-slate-800 break-all">{exportLocation}</p>
               </div>
-              <p className="text-xs text-green-700">
-                💡 In production, this would trigger an actual file download to your default Downloads folder.
-              </p>
             </div>
           </div>
         </div>
@@ -318,7 +302,7 @@ function ExportResults() {
           </svg>
           <div className="text-sm text-blue-800">
             <p className="font-semibold mb-1">Offline Export</p>
-            <p>All exports are generated locally without internet connection. Your data never leaves your device, ensuring complete privacy and data security.</p>
+            <p>All exports are generated locally. Your data never leaves your device, ensuring complete privacy and data security.</p>
           </div>
         </div>
       </div>
